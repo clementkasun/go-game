@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Multiplayer Mario Game</title>
+  <style>
+    canvas { border: 1px solid black; display: block; }
+    #score { position: absolute; top: 10px; left: 10px; font-size: 20px; }
+    #status { position: absolute; top: 50px; left: 10px; font-size: 16px; color: red; }
+    body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0f0f0; }
+  </style>
+</head>
+<body>
+  <div id="score">Score: 0</div>
+  <div id="status">Loading...</div>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const scoreDiv = document.getElementById("score");
+    const statusDiv = document.getElementById("status");
+
+    if (!ctx) {
+      console.error("Failed to get 2D canvas context");
+      statusDiv.textContent = "Error: Canvas not supported";
+      throw new Error("Canvas context not available");
+    }
+
+    // Game constants
+    const gravity = 0.5;
+    const jumpPower = -12;
+    const moveSpeed = 5;
+    const playerWidth = 20;
+    const playerHeight = 30;
+    const canvasWidth = 800;
+    const canvasHeight = 600;
+
+    // Game state
+    let players = {};
+    let coins = {};
+    let platforms = [];
+    let keys = { left: false, right: false, jump: false };
+    let isGameReady = false;
+    let lastDataReceived = Date.now();
+    let ws = null;
+
+    // Sprite assets
+    const assets = {
+      player: new Image(),
+      platform: new Image(),
+      coin: new Image(),
+      background: new Image()
+    };
+    let assetsLoaded = 0;
+    const totalAssets = 4;
+    let useFallbackGraphics = false;
+
+    // Load sprite images
+    assets.player.src = "mario.png";
+    assets.platform.src = "brick.png";
+    assets.coin.src = "coin.png";
+    assets.background.src = "background.png";
+
+    function onAssetLoad() {
+      assetsLoaded++;
+      console.log(`Asset loaded: ${this.src}, Dimensions: ${this.naturalWidth}x${this.naturalHeight}`);
+      if (assetsLoaded === totalAssets) {
+        console.log("All assets loaded successfully");
+        statusDiv.textContent = "Connecting to server...";
+        if (isGameReady && ws) startGameLoop();
+      }
+    }
+
+    function onAssetError(e) {
+      console.warn(`Failed to load asset: ${e.target.src}`);
+      assetsLoaded++;
+      useFallbackGraphics = true;
+      statusDiv.textContent = "Using fallback graphics (image load failed)";
+      if (assetsLoaded === totalAssets) {
+        if (isGameReady && ws) statusDiv.textContent = "";
+      }
+    }
+
+    assets.player.onload = onAssetLoad;
+    assets.platform.onload = onAssetLoad;
+    assets.coin.onload = onAssetLoad;
+    assets.background.onload = onAssetLoad;
+    assets.player.onerror = onAssetError;
+    assets.platform.onerror = onAssetError;
+    assets.coin.onerror = onAssetError;
+    assets.background.onerror = onAssetError;
+
+    // WebSocket connection (disabled auto-reconnect for now)
+    const playerID = prompt("Enter your player ID:") || `player_${Math.random().toString(36).slice(2)}`;
+    console.log("Player ID:", playerID);
+
+    function connectWebSocket() {
+      ws = new WebSocket(`ws://127.0.0.1:8080/ws?id=${playerID}`);
+      statusDiv.textContent = "Connecting...";
+
+      ws.onopen = function() {
+        console.log("WebSocket connected for player:", playerID);
+        statusDiv.textContent = "Connected. Waiting for game state...";
+        if (assetsLoaded === totalAssets) startGameLoop();
+      };
+
+      ws.onmessage = function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          console.log("WebSocket data received (raw):", event.data); // Log raw data
+          console.log("WebSocket data parsed:", data);
+          if (!data || typeof data !== "object") {
+            console.warn("Invalid WebSocket message data");
+            statusDiv.textContent = "Error: Invalid server data";
+            return;
+          }
+          lastDataReceived = Date.now();
+          updateGameState(data);
+          if (!isGameReady && data.players && data.coins && data.platforms) {
+            isGameReady = true;
+            console.log("Game state initialized; ready to render");
+            if (assetsLoaded === totalAssets) statusDiv.textContent = "";
+          }
+        } catch (err) {
+          console.error("WebSocket message processing error:", err, "Data:", event.data);
+          statusDiv.textContent = "Error: Failed to process server data";
+        }
+      };
+
+      ws.onclose = function() {
+        console.log("WebSocket closed for player:", playerID);
+        statusDiv.textContent = "Disconnected from server";
+        isGameReady = false;
+        players = {};
+        coins = {};
+        platforms = [];
+        // Disabled auto-reconnect for debugging
+        // setTimeout(connectWebSocket, 2000);
+      };
+
+      ws.onerror = function(err) {
+        console.error("WebSocket error:", err);
+        statusDiv.textContent = "Error: Server connection failed";
+      };
+    }
+
+    connectWebSocket();
+
+    // Update game state
+    function updateGameState(data) {
+      players = data.players || {};
+      coins = data.coins || {};
+      platforms = data.platforms || [];
+      console.log("Updated game state (players, coins, platforms):", {
+        players: Object.keys(players).length,
+        coins: Object.keys(coins).length,
+        platforms: platforms.length
+      });
+
+      platforms = platforms.map(p => ({
+        X: p.X || 0,
+        Y: p.Y || 0,
+        Width: p.Width || 100,
+        Height: p.Height || 20
+      }));
+
+      for (const id in players) {
+        players[id] = {
+          ...players[id],
+          X: players[id].X || 50,
+          Y: players[id].Y || 530,
+          VelocityY: players[id].VelocityY || 0,
+          IsJumping: players[id].IsJumping || false,
+          Score: players[id].Score || 0,
+          Color: players[id].Color || "red"
+        };
+      }
+
+      if (players[playerID]) {
+        scoreDiv.textContent = `Score: ${players[playerID].Score || 0}`;
+      } else {
+        scoreDiv.textContent = "Score: 0";
+        console.warn(`Player ${playerID} not in game state`);
+      }
+      draw();
+    }
+
+    // Fallback state if server doesn't respond
+    function initializeFallbackState() {
+      if (!isGameReady && Date.now() - lastDataReceived > 5000) {
+        console.log("No server data; initializing fallback state");
+        players[playerID] = {
+          ID: playerID,
+          X: 50,
+          Y: 530,
+          VelocityY: 0,
+          IsJumping: false,
+          Score: 0,
+          Color: "red"
+        };
+        platforms = [
+          { X: 0, Y: 550, Width: 800, Height: 50 },
+          { X: 300, Y: 400, Width: 200, Height: 20 }
+        ];
+        coins["coin1"] = { ID: "coin1", X: 400, Y: 300, Active: true };
+        isGameReady = true;
+        statusDiv.textContent = "Using fallback state (server unresponsive)";
+        if (assetsLoaded === totalAssets) statusDiv.textContent = "";
+        console.log("Fallback state initialized:", { players, platforms, coins });
+      }
+    }
+
+    // Player input handling
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") keys.left = true;
+      if (e.key === "ArrowRight") keys.right = true;
+      if (e.key === "ArrowUp" && !keys.jump) {
+        keys.jump = true;
+        const player = players[playerID];
+        if (player && !player.IsJumping) {
+          player.VelocityY = jumpPower;
+          player.IsJumping = true;
+          console.log(`Player ${playerID} jumped`);
+        }
+      }
+    });
+
+    document.addEventListener("keyup", (e) => {
+      if (e.key === "ArrowLeft") keys.left = false;
+      if (e.key === "ArrowRight") keys.right = false;
+      if (e.key === "ArrowUp") keys.jump = false;
+    });
+
+    // Apply physics and movement
+    function movePlayer() {
+      const player = players[playerID];
+      if (!player || !ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn(`No player data or WebSocket not open for ${playerID}`);
+        return;
+      }
+
+      let speed = moveSpeed;
+      if (keys.left && keys.right) speed = 0;
+      else if (keys.left) player.X -= speed;
+      else if (keys.right) player.X += speed;
+
+      player.VelocityY += gravity;
+      player.Y += player.VelocityY;
+
+      player.X = Math.max(0, Math.min(player.X, canvasWidth - playerWidth));
+      player.Y = Math.max(0, Math.min(player.Y, canvasHeight - playerHeight));
+
+      let onGround = false;
+      for (const platform of platforms) {
+        if (
+          player.X < platform.X + platform.Width &&
+          player.X + playerWidth > platform.X &&
+          player.Y + playerHeight > platform.Y &&
+          player.Y + playerHeight <= platform.Y + platform.Height &&
+          player.VelocityY >= 0
+        ) {
+          player.Y = platform.Y - playerHeight;
+          player.VelocityY = 0;
+          player.IsJumping = false;
+          onGround = true;
+        } else if (
+          player.Y < platform.Y + platform.Height &&
+          player.Y + playerHeight > platform.Y &&
+          player.X + playerWidth > platform.X &&
+          player.X < platform.X + platform.Width
+        ) {
+          if (player.VelocityY < 0) {
+            player.Y = platform.Y + platform.Height;
+            player.VelocityY = 0;
+          }
+        }
+      }
+
+      if (!onGround) player.IsJumping = true;
+
+      for (const coinID in coins) {
+        const coin = coins[coinID];
+        if (
+          coin.Active &&
+          Math.abs(player.X + playerWidth / 2 - coin.X) < 15 &&
+          Math.abs(player.Y + playerHeight / 2 - coin.Y) < 15
+        ) {
+          coin.Active = false;
+          player.Score += 10;
+          console.log(`Player ${playerID} collected coin ${coinID}`);
+        }
+      }
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          ID: player.ID,
+          X: player.X,
+          Y: player.Y,
+          VelocityY: player.VelocityY,
+          IsJumping: player.IsJumping,
+          Score: player.Score,
+          Color: player.Color
+        }));
+      }
+    }
+
+    // Draw the game state
+    function draw() {
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+      if (!isGameReady) {
+        ctx.fillStyle = "black";
+        ctx.font = "20px Arial";
+        ctx.fillText("Loading game state...", canvasWidth / 2 - 80, canvasHeight / 2);
+        console.log("Draw: Waiting for game state");
+        return;
+      }
+
+      if (!useFallbackGraphics && assets.background.complete && assets.background.naturalWidth !== 0) {
+        ctx.drawImage(assets.background, 0, 0, canvasWidth, canvasHeight);
+      } else {
+        ctx.fillStyle = "skyblue";
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight / 2);
+        ctx.fillStyle = "green";
+        ctx.fillRect(0, canvasHeight / 2, canvasWidth, canvasHeight / 2);
+      }
+
+      console.log("Drawing with state:", { players: Object.keys(players).length, coins: Object.keys(coins).length, platforms: platforms.length });
+
+      for (const platform of platforms) {
+        const x = platform.X || 0;
+        const y = platform.Y || 0;
+        const width = platform.Width || 100;
+        const height = platform.Height || 20;
+        console.log(`Drawing platform at ${x}, ${y}, ${width}x${height}`);
+        if (!useFallbackGraphics && assets.platform.complete && assets.platform.naturalWidth !== 0) {
+          ctx.drawImage(assets.platform, x, y, width, height);
+          console.log("Using platform image");
+        } else {
+          ctx.fillStyle = "brown";
+          ctx.fillRect(x, y, width, height);
+          console.log("Using fallback platform");
+        }
+      }
+
+      for (const id in coins) {
+        const coin = coins[id];
+        if (coin.Active) {
+          const x = coin.X || 0;
+          const y = coin.Y || 0;
+          console.log(`Drawing coin ${id} at ${x}, ${y}`);
+          if (!useFallbackGraphics && assets.coin.complete && assets.coin.naturalWidth !== 0) {
+            ctx.drawImage(assets.coin, x - 10, y - 10, 20, 20);
+            console.log("Using coin image");
+          } else {
+            ctx.fillStyle = "gold";
+            ctx.beginPath();
+            ctx.arc(x, y, 5, 0, Math.PI * 2);
+            ctx.fill();
+            console.log("Using fallback coin");
+          }
+        }
+      }
+
+      for (const id in players) {
+        const player = players[id];
+        const x = player.X || 0;
+        const y = player.Y || 0;
+        console.log(`Drawing player ${id} at ${x}, ${y}`);
+        if (!useFallbackGraphics && assets.player.complete && assets.player.naturalWidth !== 0) {
+          ctx.drawImage(assets.player, x, y, playerWidth, playerHeight);
+          console.log("Using player image");
+        } else {
+          ctx.fillStyle = player.Color || "red";
+          ctx.fillRect(x, y, playerWidth, playerHeight);
+          console.log("Using fallback player");
+        }
+      }
+    }
+
+    // Game loop
+    function startGameLoop() {
+      let gameLoopId;
+      function gameLoop() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          initializeFallbackState();
+          movePlayer();
+          draw();
+        }
+        gameLoopId = requestAnimationFrame(gameLoop);
+      }
+      gameLoopId = requestAnimationFrame(gameLoop);
+      return () => cancelAnimationFrame(gameLoopId);
+    }
+
+    let stopGameLoop = null;
+    if (assetsLoaded === totalAssets) {
+      stopGameLoop = startGameLoop();
+    }
+  </script>
+</body>
+</html>
